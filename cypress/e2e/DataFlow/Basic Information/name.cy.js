@@ -8,6 +8,7 @@ describe('View Profile', () => {
         cy.visit(selectUrl);
         const P1 = new Elements();
         P1.login();
+        cy.wait(3000);
         cy.get('body').then(($bodyText) => {
             const bodyText = $bodyText.text();
             if (bodyText.includes('Edit Profile')) {

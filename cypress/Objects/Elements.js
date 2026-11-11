@@ -1,4 +1,8 @@
 import un from '../fixtures/UN&PASS.json';
+import url from '../fixtures/urls.json';
+
+const selectedEnvironments = url.selectedEnvironment;
+const selectUrl = url.environments[selectedEnvironments];
 
 class Elements {
     //Login
@@ -429,6 +433,7 @@ class Elements {
         cy.get('input[aria-label="Please enter OTP character 6"]').type('6');
         cy.wait(100);
     }
+
     PTA() {
         // cy.wait(5000);
         cy.get('body').then(($bodyText) => {
@@ -450,6 +455,7 @@ class Elements {
             }
         })
     }
+
     FullName() {
         cy.get('input[placeholder="Full Name"]').then($FullName => {
             const FullName = $FullName.val();
@@ -815,31 +821,161 @@ class Elements {
         cy.wait(500);
         cy.contains('Add Another Contact').scrollIntoView().should('be.disabled');
     }
-    login(attempt = 0) {
-        cy.wait(1500);
-        cy.get('input[placeholder="Email"]').should('be.visible').and('not.be.disabled',{ timeout: 10000 });
-        cy.get('input[placeholder="Email"]').type(un.Un);
-        cy.wait(1500);
-        cy.contains('Get OTP').click();
-        cy.wait(3500);
-        this.PTA();
-        cy.wait(1000);
-        this.OTP();
-        cy.wait(1000);
-        cy.contains('Verify').click();
-        cy.wait(2000);
-        cy.get('body').then(($bodyText) => {
-            const bodyText = $bodyText.text();
-            if (bodyText.includes('Welcome')) {
-                cy.contains('Welcome').should('be.visible');
-            } else if (attempt < 3) {
-                cy.log(`Login failed. Retrying... Attempt ${attempt + 1}`);
-                cy.reload();
-                this.login(attempt + 1);
-            } else {
-                throw new Error('Login failed after 3 attempts');
+    login(attempt = 1) {
+        const maxAttempts = 3;
+        const selectedEnvironment = url.selectedEnvironment;
+        const selectUrl = url.environments[selectedEnvironment];
+
+        if (!selectUrl) {
+            throw new Error(`URL is not configured for environment: ${selectedEnvironment}`);
+        }
+
+        cy.log(`Authentication check - Attempt ${attempt} of ${maxAttempts}`);
+
+        cy.session(
+            ['global_auth_session', selectedEnvironment, un.Un],
+            () => {
+                cy.task("loadAuthData").then((localStorageData) => {
+
+                    if (localStorageData && Object.keys(localStorageData).length > 0) {
+                        cy.log("Saved Local Storage found on disk. Restoring session...");
+
+                        cy.visit(selectUrl, {
+                            onBeforeLoad: (win) => {
+                                win.localStorage.clear();
+                                Object.entries(localStorageData).forEach(([key, value]) => {
+                                    win.localStorage.setItem(key, value);
+                                });
+                            }
+                        });
+
+                        // 1. Give the app up to 15 seconds to render dashboard elements
+                        cy.get("body", { timeout: 15000 }).then(($body) => {
+                            let text = $body.text();
+                            let isLoggedIn =
+                                text.includes("Welcome") ||
+                                text.includes("Edit Profile") ||
+                                text.includes("Complete Profile") ||
+                                text.includes("Dashboard");
+
+                            if (!isLoggedIn) {
+                                // 2. Fallback: Quick reload in case the SPA missed the initial localStorage injection
+                                cy.reload();
+                                cy.wait(3000);
+                            }
+                        });
+
+                        // 3. Final verification after fallback check
+                        cy.get("body", { timeout: 10000 }).then(($body) => {
+                            const text = $body.text();
+                            const isLoggedIn =
+                                text.includes("Welcome") ||
+                                text.includes("Edit Profile") ||
+                                text.includes("Complete Profile") ||
+                                text.includes("Dashboard");
+
+                            if (!isLoggedIn) {
+                                // 4. GENUINE EXPIRY: Only delete the file here because all restorations failed
+                                cy.log("Token is genuinely expired or invalid. Clearing auth file and running OTP login...");
+                                cy.task("clearAuthData");
+                                this.performOTPLogin(selectUrl, attempt, maxAttempts);
+                            } else {
+                                cy.log("Authentication restored successfully from disk.");
+                            }
+                        });
+
+                        return;
+                    }
+
+                    // No disk cache found -> Perform OTP login once
+                    cy.log("No saved Local Storage found. Starting OTP login.");
+                    this.performOTPLogin(selectUrl, attempt, maxAttempts);
+                });
+            },
+            {
+                // Safe validation hook: only fails session if the disk file was somehow manually deleted
+                validate() {
+                    cy.task("loadAuthData").then((savedStorage) => {
+                        if (!savedStorage || Object.keys(savedStorage).length === 0) {
+                            throw new Error("Disk auth file is missing or empty.");
+                        }
+                    });
+                },
+                cacheAcrossSpecs: true
+            }
+        );
+
+        cy.visit(selectUrl);
+    }
+    performOTPLogin(selectUrl, attempt, maxAttempts) {
+        cy.visit(selectUrl, {
+            onBeforeLoad: (win) => {
+                win.localStorage.clear();
             }
         });
+
+        cy.get('input[placeholder="Email"]', { timeout: 15000 })
+            .should("be.visible")
+            .and("not.be.disabled")
+            .clear()
+            .type(un.Un);
+
+        cy.contains("Get OTP")
+            .should("be.visible")
+            .click();
+
+        cy.wait(3500);
+
+        this.PTA();
+        cy.wait(1000);
+
+        this.OTP();
+        cy.wait(1000);
+
+        cy.contains("Verify")
+            .should("be.visible")
+            .click();
+
+        cy.wait(4000);
+
+        cy.get("body", { timeout: 15000 }).then(($body) => {
+            const bodyText = $body.text();
+            const isLoginSuccessful =
+                bodyText.includes("Welcome") ||
+                bodyText.includes("Edit Profile") ||
+                bodyText.includes("Complete Profile") ||
+                bodyText.includes("Dashboard");
+
+            if (isLoginSuccessful) {
+                cy.log("OTP login successful. Saving Local Storage snapshot...");
+
+                // Wait until redux-persist writes tokens to localStorage
+                cy.window({ timeout: 10000 }).should((win) => {
+                    const userData = win.localStorage.getItem("userData");
+                    expect(userData, "userData in localStorage").to.not.be.null;
+                });
+
+                cy.wait(1000);
+
+                // Save to disk using your custom task in commands.js
+                cy.saveAuthData();
+                return;
+            }
+
+            if (attempt < maxAttempts) {
+                cy.log(`Login failed. Retrying attempt ${attempt + 1} of ${maxAttempts}`);
+                cy.reload();
+                this.performOTPLogin(selectUrl, attempt + 1, maxAttempts);
+                return;
+            }
+
+            throw new Error(`Login failed after ${maxAttempts} attempts.`);
+        });
     }
+
+    // Keep your existing performOTPLogin(), PTA(), and OTP()
+    // implementations below this line without changing selectors.
+
+
 }
 export default Elements;
