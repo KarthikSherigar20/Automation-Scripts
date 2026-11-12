@@ -32,9 +32,9 @@ module.exports = defineConfig({
             on("task", {
 
                 // PARSE XLSX
-                parseXlsx(filePath) {
+                parseXlsx({ filePath }) {
                     const xlsx = require("node-xlsx");
-                    return xlsx.parse(filePath);
+                    return xlsx.parse(fs.readFileSync(filePath));
                 },
 
                 // READ PDF
